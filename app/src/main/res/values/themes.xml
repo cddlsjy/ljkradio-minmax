@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- 基础应用主题 -->
+    <style name="Theme.IjkRadioPlayer" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+        <!-- 主颜色 -->
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+        <item name="colorPrimaryVariant">@color/colorPrimaryVariant</item>
+
+        <!-- 次要颜色 -->
+        <item name="colorSecondary">@color/colorSecondary</item>
+        <item name="colorSecondaryVariant">@color/colorSecondaryVariant</item>
+
+        <!-- 背景和表面 -->
+        <item name="android:colorBackground">@color/background</item>
+        <item name="colorSurface">@color/colorSurface</item>
+
+        <!-- 错误颜色 -->
+        <item name="colorError">@color/error</item>
+
+        <!-- 状态栏 -->
+        <item name="android:statusBarColor">@color/status_bar_color</item>
+
+        <!-- 导航栏 -->
+        <item name="android:navigationBarColor">@color/colorPrimaryDark</item>
+
+        <!-- ActionBar -->
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+
+    <!-- 对话框主题 -->
+    <style name="Theme.IjkRadioPlayer.Dialog" parent="ThemeOverlay.MaterialComponents.Dialog.Alert">
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorSecondary">@color/colorSecondary</item>
+    </style>
+
+</resources>

@@ -1,0 +1,192 @@
+ 我来对比分析这两个方案，帮你选择最合适的。
+
+## 方案对比
+
+| 维度 | DeepSeek 方案 | 我的方案 |
+|------|--------------|---------|
+| **核心思路** | 增加 `isInErrorState` 标志，错误后延迟重建播放器 | 错误时立即 `reset()`，失败则重建播放器 |
+| **重建时机** | 延迟到下次 `playStation()` 或 `handler.post` | 错误回调中立即尝试 |
+| **代码侵入性** | 需新增状态标志和延迟逻辑 | 保持原有逻辑流，增加异常处理 |
+| **遥控器切换** | 依赖 `playStation()` 开头的状态检查 | 依赖 `stop()` + 延迟播放 |
+
+---
+
+## DeepSeek 方案的优势
+
+1. **避免在错误回调中直接操作播放器** - 使用 `handler.post` 延迟重建，符合某些播放器框架的安全要求
+2. **状态标志清晰** - `isInErrorState` 让状态判断更明确
+3. **软解码自动回退** - 针对央广/环球资讯有专门的降级逻辑
+
+---
+
+## DeepSeek 方案的潜在问题
+
+```kotlin
+// 问题1：延迟重建可能导致竞态条件
+handler.post {
+    reinitializePlayer()  // 如果用户快速切换，可能重复重建
+}
+
+// 问题2：递归重试没有防循环保护
+playStation(station)   // 递归调用，如果软解码也失败会无限递归
+```
+
+---
+
+## 我的建议：融合两个方案的优点
+
+### 推荐方案（结合两者优势）
+
+```kotlin
+class IjkPlayerManager private constructor(private val context: Context) {
+
+    companion object {
+        private const val TAG = "IjkPlayerManager"
+        private const val BUFFER_SIZE = 1024 * 1024
+        private const val RECONNECT_ATTEMPTS = 5
+    }
+
+    private var ijkPlayer: IjkMediaPlayer? = null
+    private var currentStation: Station? = null
+    private var isInitialized = false
+    private var isInErrorState = false  // 来自 DeepSeek
+    private var currentVolume = 1.0f
+    private var hardwareDecodeEnabled = true
+    private var retryCount = 0  // 防递归保护
+
+    // DeepSeek 的延迟重建思想 + 我的同步重建
+    private fun reinitializePlayer() {
+        synchronized(this) {
+            try {
+                ijkPlayer?.release()
+                ijkPlayer = null
+                isInitialized = false
+                isInErrorState = false
+                initialize()
+            } catch (e: Exception) {
+                Log.e(TAG, "reinitializePlayer failed", e)
+            }
+        }
+    }
+
+    fun playStation(station: Station) {
+        // 防递归保护
+        if (retryCount > 1) {
+            retryCount = 0
+            _playbackState.postValue(PlaybackState.Error("播放重试失败"))
+            return
+        }
+
+        // 错误状态检查（DeepSeek 的优点）
+        if (isInErrorState || !isInitialized || ijkPlayer == null) {
+            Log.d(TAG, "Player needs reinitialization")
+            reinitializePlayer()
+        }
+
+        currentStation = station
+        _playbackState.postValue(PlaybackState.Buffering)
+
+        try {
+            ijkPlayer?.let { player ->
+                // 我的方案：确保干净状态
+                player.reset()
+                player.configurePlayer()
+                player.setupListeners()
+
+                // 针对特定流的优化（DeepSeek 的优点）
+                if (station.url.contains("cri.cn") || station.url.contains("sk.cri.cn")) {
+                    player.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "user_agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    player.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "referer",
+                        "https://sk.cri.cn/")
+                }
+
+                player.dataSource = station.url
+                player.prepareAsync()
+                retryCount = 0  // 成功准备，重置计数
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error playing station", e)
+            handlePlayError(station, e.message ?: "未知错误")
+        }
+    }
+
+    private fun handlePlayError(station: Station, errorMsg: String) {
+        isInErrorState = true
+        currentStation = null
+        _playbackState.postValue(PlaybackState.Error(errorMsg))
+        stopPositionUpdates()
+
+        // 央广/环球资讯自动软解码重试（DeepSeek 的优点 + 防递归）
+        if (hardwareDecodeEnabled && retryCount == 0 &&
+            (station.url.contains("cri.cn") || station.url.contains("sk.cri.cn"))) {
+            retryCount++
+            Log.d(TAG, "Retrying with software decode")
+            setHardwareDecode(false)
+            // 延迟重试，避免立即递归
+            handler.postDelayed({ playStation(station) }, 500)
+            return
+        }
+
+        retryCount = 0
+        // 我的方案：立即重建，确保下次可用
+        reinitializePlayer()
+    }
+
+    // 错误监听器：结合两种方案
+    private inner class OnErrorListenerImpl : IMediaPlayer.OnErrorListener {
+        override fun onError(mp: IMediaPlayer?, what: Int, extra: Int): Boolean {
+            val errorMsg = when (what) {
+                IMediaPlayer.MEDIA_ERROR_NOT_VALID_FOR_PROGRESSIVE_PLAYBACK -> "视频内容无效"
+                IMediaPlayer.MEDIA_ERROR_UNKNOWN -> "未知错误: what=$what, extra=$extra"
+                else -> "播放错误: what=$what, extra=$extra"
+            }
+            Log.e(TAG, "Playback error: $errorMsg")
+            
+            // 使用统一错误处理
+            handlePlayError(currentStation ?: return true, errorMsg)
+            return true
+        }
+    }
+}
+```
+
+---
+
+## MainActivity 的关键修改（必须）
+
+无论用哪个方案，**MainActivity 都需要修改 `moveSelection`**：
+
+```kotlin
+private fun moveSelection(delta: Int) {
+    val currentPos = getSelectedPosition()
+    val newPos = currentPos + delta
+    if (newPos in 0 until stationAdapter.itemCount) {
+        val station = stationAdapter.getItemAt(newPos) ?: return
+        
+        // 关键：先更新 UI 焦点
+        stationAdapter.setSelectedStation(station)
+        recyclerView.smoothScrollToPosition(newPos)
+        
+        // 关键：强制停止当前播放，确保状态重置
+        playerManager.stop()
+        
+        // 延迟播放，确保 stop 完成
+        recyclerView.postDelayed({
+            playStationAndUpdateUI(station)
+        }, 200)
+    }
+}
+```
+
+---
+
+## 结论
+
+| 场景 | 推荐 |
+|------|------|
+| 想要**最小改动** | 用我的方案（直接 `reset()`） |
+| 想要**最健壮** | 用融合方案（状态标志 + 防递归 + 自动软解降级） |
+| 只想要**快速修复** | 必须修改 `MainActivity.moveSelection()`，加 `stop()` + 延迟 |
+
+**核心问题**不是选哪个方案，而是 **必须在错误后彻底重置播放器状态**。两个方案都能解决这个问题，融合方案更完整。
